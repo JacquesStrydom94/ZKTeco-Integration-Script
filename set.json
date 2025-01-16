@@ -1,0 +1,4 @@
+{
+    "target_time": "24:00",
+    "cmd": "DATA QUERY ATTLOG StartTime=startTime EndTime=endTime"
+}

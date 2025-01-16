@@ -98,14 +98,6 @@ def check_db():
         conn.commit()
         conn.close()
 
-def start_server(port):
-    server_address = ("0.0.0.0", port)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind(server_address)
-        server_socket.listen(5)
-        logger.info(f"Server listening on 0.0.0.0:{port}")
-
 def run_script(script_instance):
     script_instance.run()
 
@@ -118,31 +110,18 @@ if __name__ == "__main__":
 
             s1 = PostScript()
             s2 = Dbcon()
-            s3 = TcpServer("0.0.0.0", [
-                {"ip": "127.0.0.1", "port": 5001},
-                {"ip": "127.0.0.1", "port": 5002},
-                {"ip": "127.0.0.1", "port": 5003},
-                {"ip": "127.0.0.1", "port": 5004},
-                {"ip": "127.0.0.1", "port": 5005},
-                {"ip": "127.0.0.1", "port": 5006},
-                {"ip": "127.0.0.1", "port": 5007},
-                {"ip": "127.0.0.1", "port": 5008},
-                {"ip": "127.0.0.1", "port": 5009},
-                {"ip": "127.0.0.1", "port": 5010}
-            ], "attlog.json", "sanatise.json")
-            s4 = CmdScriptModule.CmdScript(5005, "13:41")
+            s3 = TcpServer("devices.json", "attlog.json", "sanatise.json")
+            s4 = CmdScriptModule.Cmd("set.json", "devices.json")
 
             t1 = threading.Thread(target=s1.post_and_update_records)
             t2 = threading.Thread(target=s2.run)
             t3 = threading.Thread(target=s3.run)
-            t4 = threading.Thread(target=s4.run)
+            t4 = threading.Thread(target=s4.wait_until_specified_time)
 
             t1.start()
             t2.start()
             t3.start()
             t4.start()
-
-            start_server(5005)  # Example of calling the start_server method
 
             t1.join()
             t2.join()

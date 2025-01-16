@@ -9,6 +9,7 @@ import time
 import re
 from attlog_parser import AttLogParser
 
+# Configure logging with ANSI escape codes for colors
 class CustomFormatter(logging.Formatter):
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
@@ -42,11 +43,29 @@ handler.setFormatter(CustomFormatter())
 logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
 class TcpServer:
-    def __init__(self, host, devices, attlog_filename, sanatise_filename):
-        self.host = host
-        self.devices = devices
+    def __init__(self, devices_file, attlog_filename, sanatise_filename):
+        self.devices_file = devices_file
+        self.load_devices()
         self.attlog_filename = attlog_filename
         self.sanatise_filename = sanatise_filename
+        self.local_ip = self.get_local_ip()
+
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # Connect to an external IP address (Google DNS)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        except Exception as e:
+            logging.error(f"Failed to get local IP address: {e}")
+            ip = "0.0.0.0"
+        finally:
+            s.close()
+        return ip
+
+    def load_devices(self):
+        with open(self.devices_file, "r") as file:
+            self.devices = json.load(file)
 
     def extract_attlog(self, data):
         content_length_index = data.find("Content-Length:")
@@ -86,50 +105,66 @@ class TcpServer:
             queue.task_done()
 
     def handle_device(self, host, port, device_ip, queue):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, port))
-            s.listen()
-            s.settimeout(10)  # Set socket timeout for faster handling
-            logging.info(f"Server listening on {host}:{port}")
-            while True:
-                try:
-                    conn, addr = s.accept()
-                    with conn:
-                        logging.info(f"Connected by {addr} (expected {device_ip})")
-                        conn.settimeout(10)
-                        while True:
-                            try:
-                                data = conn.recv(4096)
-                                if not data:
-                                    break
-                                try:
-                                    data_str = data.decode('utf-8')
-                                except UnicodeDecodeError:
-                                    data_str = data.decode('utf-8', errors='ignore')
-                                    logging.warning("Invalid byte sequence encountered. Proceeding with ignored errors.")
-                                
-                                logging.debug(f"Received from client: {data_str}")
+        retry_count = 0
+        max_retries = 5
+        retry_delay = 5
 
-                                if "=ATTLOG&Stamp=9999" in data_str:
-                                    attlog_data = self.extract_attlog(data_str)
-                                    sn_value = self.extract_sn(data_str)
-                                    if attlog_data and sn_value:
-                                        combined_value = f"{attlog_data}\t{addr}\t{sn_value}"
-                                        json_packet = {
-                                            "attlog": combined_value
-                                        }
-                                        logging.info(f"Parsed JSON packet: {json.dumps(json_packet, indent=2)}")
-                                        logging.debug(f"Adding to queue: {json_packet}")
-                                        queue.put(json_packet)
+        while True:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind((host, port))
+                    s.listen()
+                    s.settimeout(60)  # Increase socket timeout
+                    logging.info(f"Server listening on {host}:{port}")
+                    while True:
+                        try:
+                            conn, addr = s.accept()
+                            with conn:
+                                logging.info(f"Connected by {addr} (expected {device_ip})")
+                                conn.settimeout(60)
+                                while True:
+                                    try:
+                                        data = conn.recv(4096)
+                                        if not data:
+                                            break
+                                        try:
+                                            data_str = data.decode('utf-8')
+                                        except UnicodeDecodeError:
+                                            data_str = data.decode('utf-8', errors='ignore')
+                                            logging.warning("Invalid byte sequence encountered. Proceeding with ignored errors.")
+                                        
+                                        logging.debug(f"Received from client: {data_str}")
 
-                                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
-                                response = f"Server Send Data: {timestamp}\nOK"
-                                conn.sendall(response.encode())
-                            except socket.timeout:
-                                logging.info(f"Connection timeout with {addr}")
-                                break
-                except socket.timeout:
-                    logging.info("Listening socket timeout")
+                                        if "=ATTLOG&Stamp=9999" in data_str:
+                                            attlog_data = self.extract_attlog(data_str)
+                                            sn_value = self.extract_sn(data_str)
+                                            if attlog_data and sn_value:
+                                                combined_value = f"{attlog_data}\t{addr}\t{sn_value}"
+                                                json_packet = {
+                                                    "attlog": combined_value
+                                                }
+                                                logging.info(f"Parsed JSON packet: {json.dumps(json_packet, indent=2)}")
+                                                logging.debug(f"Adding to queue: {json_packet}")
+                                                queue.put(json_packet)
+
+                                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
+                                        response = f"Server Send Data: {timestamp}\nOK"
+                                        conn.sendall(response.encode())
+                                    except socket.timeout:
+                                        logging.info(f"Connection timeout with {addr}")
+                                        break
+                        except socket.timeout:
+                            logging.info("Listening socket timeout")
+            except OSError as e:
+                if e.errno == 98:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        logging.error(f"Port {port} is still in use after {max_retries} retries. Exiting.")
+                        break
+                    logging.error(f"Port {port} is already in use. Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    raise
 
     def start_server(self):
         queue = Queue()
@@ -141,7 +176,7 @@ class TcpServer:
         threads = []
         
         for device in self.devices:
-            thread = threading.Thread(target=self.handle_device, args=(self.host, device['port'], device['ip'], queue))
+            thread = threading.Thread(target=self.handle_device, args=(self.local_ip, device['port'], device['ip'], queue))
             threads.append(thread)
             thread.start()
         
@@ -166,21 +201,9 @@ class TcpServer:
         self.start_server()
 
 if __name__ == "__main__":
-    host = "0.0.0.0"
-    devices = [
-        {"ip": "127.0.0.1", "port": 5001},
-        {"ip": "127.0.0.1", "port": 5002},
-        {"ip": "127.0.0.1", "port": 5003},
-        {"ip": "127.0.0.1", "port": 5004},
-        {"ip": "127.0.0.1", "port": 5005},
-        {"ip": "127.0.0.1", "port": 5006},
-        {"ip": "127.0.0.1", "port": 5007},
-        {"ip": "127.0.0.1", "port": 5008},
-        {"ip": "127.0.0.1", "port": 5009},
-        {"ip": "127.0.0.1", "port": 5010}
-    ]
+    devices_file = "devices.json"
     attlog_filename = "attlog.json"
     sanatise_filename = "sanatise.json"
 
-    tcp_server = TcpServer(host, devices, attlog_filename, sanatise_filename)
+    tcp_server = TcpServer(devices_file, attlog_filename, sanatise_filename)
     tcp_server.run()
