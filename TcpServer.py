@@ -31,7 +31,7 @@ class CustomFormatter(logging.Formatter):
             log_fmt = self.BLUE + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
         elif "Closing connection" in record.msg:
             log_fmt = self.RED + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
-        elif "Writing new entries to sanatise.json" in record.msg:
+        elif "Writing new entries to attlog.json" in record.msg:
             log_fmt = self.PINK + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
         else:
             log_fmt = self.FORMATS.get(record.levelno, self.FORMATS['DEFAULT'])
@@ -43,11 +43,10 @@ handler.setFormatter(CustomFormatter())
 logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
 class TcpServer:
-    def __init__(self, devices_file, attlog_filename, sanatise_filename):
+    def __init__(self, devices_file, attlog_filename):
         self.devices_file = devices_file
         self.load_devices()
         self.attlog_filename = attlog_filename
-        self.sanatise_filename = sanatise_filename
         self.local_ip = self.get_local_ip()
 
     def get_local_ip(self):
@@ -140,12 +139,12 @@ class TcpServer:
                                             sn_value = self.extract_sn(data_str)
                                             if attlog_data and sn_value:
                                                 combined_value = f"{attlog_data}\t{addr}\t{sn_value}"
-                                                json_packet = {
-                                                    "attlog": combined_value
-                                                }
-                                                logging.info(f"Parsed JSON packet: {json.dumps(json_packet, indent=2)}")
-                                                logging.debug(f"Adding to queue: {json_packet}")
-                                                queue.put(json_packet)
+                                                log_entry = AttLogParser.parse_attlog(combined_value)
+                                                logging.info(f"Parsed log entry: {log_entry}")
+                                                AttLogParser().write_to_output([log_entry])
+
+                                                logging.debug(f"Adding to queue: {log_entry}")
+                                                queue.put(log_entry)
 
                                         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
                                         response = f"Server Send Data: {timestamp}\nOK"
@@ -190,10 +189,6 @@ class TcpServer:
         if not os.path.exists(self.attlog_filename):
             with open(self.attlog_filename, 'w') as f:
                 json.dump([], f)
-        
-        if not os.path.exists(self.sanatise_filename):
-            with open(self.sanatise_filename, 'w') as f:
-                json.dump([], f)
 
         parser_thread = threading.Thread(target=AttLogParser().run)
         parser_thread.start()
@@ -203,7 +198,6 @@ class TcpServer:
 if __name__ == "__main__":
     devices_file = "devices.json"
     attlog_filename = "attlog.json"
-    sanatise_filename = "sanatise.json"
 
-    tcp_server = TcpServer(devices_file, attlog_filename, sanatise_filename)
+    tcp_server = TcpServer(devices_file, attlog_filename)
     tcp_server.run()

@@ -6,6 +6,7 @@ from datetime import datetime
 from Post import PostScript
 from Dbcon import Dbcon
 from TcpServer import TcpServer
+from attlog_parser import AttLogParser  # Ensure this import
 import socket
 import sys
 from contextlib import redirect_stdout, redirect_stderr
@@ -110,7 +111,7 @@ if __name__ == "__main__":
 
             s1 = PostScript()
             s2 = Dbcon()
-            s3 = TcpServer("devices.json", "attlog.json", "sanatise.json")
+            s3 = TcpServer("devices.json", "attlog.json")  # Initialize correctly with two arguments
             s4 = CmdScriptModule.Cmd("set.json", "devices.json")
 
             t1 = threading.Thread(target=s1.post_and_update_records)
