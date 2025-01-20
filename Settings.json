@@ -1,0 +1,22 @@
+{
+    "settings": {
+        "target_time": "15:05",
+        "cmd": "DATA QUERY ATTLOG StartTime=startTime EndTime=endTime"
+    },
+    "logs": [
+        {"DBID":"97065"},
+        {"Token":"90225A9B19414979BE70DCEDFBCE6E6C"}
+    ],
+    "devices": [
+        {"ip": "127.0.0.1", "port": 5001},
+        {"ip": "127.0.0.1", "port": 5002},
+        {"ip": "127.0.0.1", "port": 5003},
+        {"ip": "127.0.0.1", "port": 5004},
+        {"ip": "127.0.0.1", "port": 5005},
+        {"ip": "127.0.0.1", "port": 5006},
+        {"ip": "127.0.0.1", "port": 5007},
+        {"ip": "127.0.0.1", "port": 5008},
+        {"ip": "127.0.0.1", "port": 5009},
+        {"ip": "127.0.0.1", "port": 5010}
+    ]
+}
