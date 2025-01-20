@@ -6,7 +6,7 @@ from datetime import datetime
 from Post import PostScript
 from Dbcon import Dbcon
 from TcpServer import TcpServer
-from attlog_parser import AttLogParser  # Ensure this import
+from attlog_parser import AttLogParser
 import socket
 import sys
 from contextlib import redirect_stdout, redirect_stderr
