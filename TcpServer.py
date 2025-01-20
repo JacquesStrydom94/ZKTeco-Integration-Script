@@ -126,25 +126,26 @@ class TcpServer:
                                         data = conn.recv(4096)
                                         if not data:
                                             break
-                                        try:
-                                            data_str = data.decode('utf-8')
-                                        except UnicodeDecodeError:
-                                            data_str = data.decode('utf-8', errors='ignore')
-                                            logging.warning("Invalid byte sequence encountered. Proceeding with ignored errors.")
+                                        data_str = data.decode('utf-8')
+                                        logging.debug(f"Received data from client: {data_str}")
                                         
-                                        logging.debug(f"Received from client: {data_str}")
-
                                         if "=ATTLOG&Stamp=9999" in data_str:
                                             attlog_data = self.extract_attlog(data_str)
                                             sn_value = self.extract_sn(data_str)
+                                            logging.debug(f"Extracted attlog_data: {attlog_data}")
+                                            logging.debug(f"Extracted sn_value: {sn_value}")
+                                            
                                             if attlog_data and sn_value:
-                                                combined_value = f"{attlog_data}\t{addr}\t{sn_value}"
-                                                log_entry = AttLogParser.parse_attlog(combined_value)
-                                                logging.info(f"Parsed log entry: {log_entry}")
-                                                AttLogParser().write_to_output([log_entry])
-
-                                                logging.debug(f"Adding to queue: {log_entry}")
-                                                queue.put(log_entry)
+                                                # Split the attlog_data into individual log entries
+                                                log_entries = attlog_data.split("\n")
+                                                for entry in log_entries:
+                                                    if entry.strip():  # Check if the entry is not empty
+                                                        combined_value = f"{entry}\t{addr}\t{sn_value}"
+                                                        log_entry = AttLogParser.parse_attlog(combined_value)
+                                                        logging.info(f"Parsed log entry: {log_entry}")
+                                                        
+                                                        logging.debug(f"Adding log entry to queue: {log_entry}")
+                                                        queue.put(log_entry)
 
                                         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
                                         response = f"Server Send Data: {timestamp}\nOK"

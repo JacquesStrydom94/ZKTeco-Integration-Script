@@ -123,6 +123,7 @@ class AttLogParser(threading.Thread):
             # Append the new data from the queue
             while not self.log_queue.empty():
                 entry = self.log_queue.get()
+                logging.debug(f"Queue item to write: {entry}")
                 existing_data.append(entry)
             
             # Write the updated data back to the file
