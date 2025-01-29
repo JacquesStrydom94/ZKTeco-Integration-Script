@@ -7,3 +7,5 @@ ZKteco clocking device integration for gathering clocking Data from each device 
  *yum update python3
  *yum install python3-pip
  *pip install pipreqs
+this will ensure that the prerequisits for running the script is met.
+to set the parameters such as the device's ip address and port utilise the settings.json file accordingly.
