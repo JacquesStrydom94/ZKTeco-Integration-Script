@@ -9,3 +9,4 @@ ZKteco clocking device integration for gathering clocking Data from each device 
  *pip install pipreqs
 this will ensure that the prerequisits for running the script is met.
 to set the parameters such as the device's ip address and port utilise the settings.json file accordingly.
+a Screen -S command can be used to keep the script alive
