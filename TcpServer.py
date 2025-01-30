@@ -8,6 +8,10 @@ from queue import Queue
 import time
 import re
 from attlog_parser import AttLogParser
+import select
+
+# Maximum buffer size for each device
+MAX_BUFFER_SIZE_PER_DEVICE = 2097152  # 2 MB
 
 # Configure logging with ANSI escape codes for colors
 class CustomFormatter(logging.Formatter):
@@ -18,23 +22,23 @@ class CustomFormatter(logging.Formatter):
     PINK = "\033[95m"
     RESET = "\033[0m"
     FORMATS = {
-        logging.INFO: "%(asctime)s - %(levelname)s - %(message)s",
-        'DEFAULT': "%(asctime)s - %(levelname)s - %(message)s"
+        logging.INFO: "%(asctime)s - %(levellevel)s - %(message)s",
+        'DEFAULT': "%(asctime)s - %(levellevel)s - %(message)s"
     }
 
     def format(self, record):
         if "Connected by" in record.msg or "Server listening" in record.msg:
-            log_fmt = self.GREEN + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
+            log_fmt = self.GREEN + "%(asctime)s - %(levellevel)s - %(message)s" + self.RESET
         elif "Received from client" in record.msg:
-            log_fmt = self.YELLOW + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
+            log_fmt = self.YELLOW + "%(asctime)s - %(levellevel)s - %(message)s" + self.RESET
         elif "Writing to file" in record.msg or "Parsed JSON packet" in record.msg:
-            log_fmt = self.BLUE + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
+            log_fmt = self.BLUE + "%(asctime)s - %(levellevel)s - %(message)s" + self.RESET
         elif "Closing connection" in record.msg:
-            log_fmt = self.RED + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
+            log_fmt = self.RED + "%(asctime)s - %(levellevel)s - %(message)s" + self.RESET
         elif "Writing new entries to attlog.json" in record.msg:
-            log_fmt = self.PINK + "%(asctime)s - %(levelname)s - %(message)s" + self.RESET
+            log_fmt = self.PINK + "%(asctime)s - %(levellevel)s - %(message)s" + self.RESET
         else:
-            log_fmt = self.FORMATS.get(record.levelno, self.FORMATS['DEFAULT'])
+            log_fmt = self.FORMATS.get(record.levellevel, self.FORMATS['DEFAULT'])
         formatter = logging.Formatter(log_fmt)
         return formatter.format(record)
 
@@ -105,65 +109,61 @@ class TcpServer:
             queue.task_done()
 
     def handle_device(self, host, port, device_ip, queue):
-        retry_count = 0
-        max_retries = 5
-        retry_delay = 5
-
         while True:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, MAX_BUFFER_SIZE_PER_DEVICE)
                     s.bind((host, port))
                     s.listen()
-                    s.settimeout(60)  # Increase socket timeout
                     logging.info(f"Server listening on {host}:{port}")
+
                     while True:
-                        try:
+                        ready_to_read, _, _ = select.select([s], [], [])
+                        if ready_to_read:
                             conn, addr = s.accept()
                             with conn:
                                 logging.info(f"Connected by {addr} (expected {device_ip})")
-                                conn.settimeout(60)
+                                data_fragments = []
                                 while True:
-                                    try:
-                                        data = conn.recv(4096)
-                                        if not data:
-                                            break
-                                        data_str = data.decode('utf-8')
-                                        logging.debug(f"Received data from client: {data_str}")
-                                        
-                                        if "=ATTLOG&Stamp=9999" in data_str:
-                                            attlog_data = self.extract_attlog(data_str)
-                                            sn_value = self.extract_sn(data_str)
-                                            logging.debug(f"Extracted attlog_data: {attlog_data}")
-                                            logging.debug(f"Extracted sn_value: {sn_value}")
-                                            
-                                            if attlog_data and sn_value:
-                                                # Split the attlog_data into individual log entries
-                                                log_entries = attlog_data.split("\n")
-                                                for entry in log_entries:
-                                                    if entry.strip():  # Check if the entry is not empty
-                                                        combined_value = f"{entry}\t{addr}\t{sn_value}"
-                                                        log_entry = AttLogParser.parse_attlog(combined_value)
-                                                        logging.info(f"Parsed log entry: {log_entry}")
-                                                        
-                                                        logging.debug(f"Adding log entry to queue: {log_entry}")
-                                                        queue.put(log_entry)
-
-                                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
-                                        response = f"Server Send Data: {timestamp}\nOK"
-                                        conn.sendall(response.encode())
-                                    except socket.timeout:
-                                        logging.info(f"Connection timeout with {addr}")
+                                    data = conn.recv(MAX_BUFFER_SIZE_PER_DEVICE)
+                                    if not data:
+                                        logging.info(f"No more data received from {addr}")
                                         break
-                        except socket.timeout:
-                            logging.info("Listening socket timeout")
+                                    data_fragments.append(data)
+
+                                if data_fragments:
+                                    complete_data = b''.join(data_fragments)
+                                    data_str = complete_data.decode('utf-8')
+                                    logging.debug(f"Received data from client: {data_str}")
+
+                                    if "=ATTLOG&Stamp=9999" in data_str:
+                                        attlog_data = self.extract_attlog(data_str)
+                                        sn_value = self.extract_sn(data_str)
+                                        logging.debug(f"Extracted attlog_data: {attlog_data}")
+                                        logging.debug(f"Extracted sn_value: {sn_value}")
+
+                                        if attlog_data and sn_value:
+                                            log_entries = attlog_data.split("\n")
+                                            for entry in log_entries:
+                                                if entry.strip():  # Check if the entry is not empty
+                                                    combined_value = f"{entry}\t{addr}\t{sn_value}"
+                                                    log_entry = AttLogParser.parse_attlog(combined_value)
+                                                    logging.info(f"Parsed log entry: {log_entry}")
+                                                    logging.debug(f"Adding log entry to queue: {log_entry}")
+                                                    queue.put(log_entry)
+
+                                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')[:-3]
+                                    response = f"Server Send Data: {timestamp}\nOK"
+                                    conn.sendall(response.encode())
+                                else:
+                                    logging.info(f"No complete data received from {addr}")
+
+                        else:
+                            logging.debug("No connections ready to read")
+
             except OSError as e:
                 if e.errno == 98:
-                    retry_count += 1
-                    if retry_count > max_retries:
-                        logging.error(f"Port {port} is still in use after {max_retries} retries. Exiting.")
-                        break
-                    logging.error(f"Port {port} is already in use. Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
+                    logging.error(f"Port {port} is already in use. Retrying immediately...")
                 else:
                     raise
 
