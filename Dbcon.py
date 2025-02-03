@@ -31,6 +31,18 @@ def update_record_count(count):
     settings["System para"][0]["Rec Count"] = str(count)
     save_settings(settings)
 
+def parse_timestamp(timestamp):
+    """
+    Convert timestamp to the correct format, handling both 'YYYY/MM/DD HH:MM:SS' and 'YYYY-MM-DD HH:MM:SS'.
+    """
+    for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(timestamp, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    logger.error(f"⚠ Invalid Timestamp format: {timestamp}")
+    return None
+
 class Dbcon:
     def __init__(self, attlog_file=ATTLOG_FILE, db_name=DB_NAME):
         self.attlog_file = attlog_file
@@ -70,11 +82,9 @@ class Dbcon:
         new_count = record_count
 
         for entry in content[record_count:]:
-            try:
-                formatted_timestamp = datetime.strptime(entry['Timestamp'], "%Y/%m/%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError as e:
-                logger.error(f"⚠ Invalid Timestamp format: {entry['Timestamp']} - {e}")
-                continue
+            formatted_timestamp = parse_timestamp(entry['Timestamp'])
+            if formatted_timestamp is None:
+                continue  # Skip invalid timestamps
 
             # Check if record already exists
             cursor.execute("SELECT COUNT(*) FROM attendance WHERE ZKID = ? AND Timestamp = ?", (entry['ZKID'], formatted_timestamp))
