@@ -11,6 +11,7 @@ this will ensure that the prerequisits for running the script is met.
 to set the parameters such as the device's ip address and port utilise the settings.json file accordingly.
 a Screen -S command can be used to keep the script alive
 use git clone "git directory" to install script files to local machine
+use "git clone --depth=1 https://github.com/JacquesStrydom94/ZKTeco-Integration-Script.git ."
 pip3 uninstall urllib3
 pip3 install urllib3==1.26.14
 pip3 uninstall requests
