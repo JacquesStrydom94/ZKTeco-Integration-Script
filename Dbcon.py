@@ -64,8 +64,7 @@ class Dbcon:
             RESPONSE TEXT,
             KEY TEXT,
             FTID TEXT
-        )
-        ''')
+        )''')
 
         record_count = get_record_count()
         new_count = record_count
@@ -77,12 +76,20 @@ class Dbcon:
                 logger.error(f"⚠ Invalid Timestamp format: {entry['Timestamp']} - {e}")
                 continue
 
-            cursor.execute('''
-                INSERT INTO attendance (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (entry['ZKID'], formatted_timestamp, entry['InorOut'], entry['attype'], entry['Device'], entry['SN'], entry.get('Devrec', '')))
-            
-            new_count += 1
+            # Check if record already exists
+            cursor.execute("SELECT COUNT(*) FROM attendance WHERE ZKID = ? AND Timestamp = ?", (entry['ZKID'], formatted_timestamp))
+            exists = cursor.fetchone()[0] > 0
+
+            if not exists:
+                logger.info(f"📌 Inserting new record: {entry}")  # Log each new record before inserting
+                cursor.execute('''
+                    INSERT INTO attendance (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''', 
+                    (entry['ZKID'], formatted_timestamp, entry['InorOut'], entry['attype'], entry['Device'], entry['SN'], entry.get('Devrec', '')))
+                
+                new_count += 1
+            else:
+                logger.info(f"⚠ Record already exists, skipping: {entry}")
 
         conn.commit()
         conn.close()
