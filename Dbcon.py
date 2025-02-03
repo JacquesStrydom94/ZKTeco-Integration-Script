@@ -1,5 +1,5 @@
-import json
 import sqlite3
+import json
 import os
 import logging
 from datetime import datetime
@@ -9,27 +9,32 @@ logger = logging.getLogger()
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 SETTINGS_FILE = "Settings.json"
+ATTLOG_FILE = "attlog.json"
+DB_NAME = "PUSH.db"
 
 def load_settings():
-    """ Load settings.json and get Rec Count """
     if not os.path.exists(SETTINGS_FILE):
         return {"System para": [{"Rec Count": "0"}]}
-    
     with open(SETTINGS_FILE, "r") as file:
-        data = json.load(file)
-    return data
+        return json.load(file)
 
 def save_settings(settings):
-    """ Save updated settings.json """
     with open(SETTINGS_FILE, "w") as file:
         json.dump(settings, file, indent=4)
 
+def get_record_count():
+    settings = load_settings()
+    return int(settings["System para"][0]["Rec Count"])
+
+def update_record_count(count):
+    settings = load_settings()
+    settings["System para"][0]["Rec Count"] = str(count)
+    save_settings(settings)
+
 class Dbcon:
-    def __init__(self, attlog_file='attlog.json', db_name='PUSH.db'):
+    def __init__(self, attlog_file=ATTLOG_FILE, db_name=DB_NAME):
         self.attlog_file = attlog_file
         self.db_name = db_name
-        self.settings = load_settings()
-        self.rec_count = int(self.settings["System para"][0]["Rec Count"])  # Get last processed count
 
     def process_attlog_file(self):
         if os.path.getsize(self.attlog_file) == 0:
@@ -43,72 +48,56 @@ class Dbcon:
             logger.error(f"Error reading attlog.json: {e}")
             return
 
-        if self.rec_count >= len(content):
-            logger.info("No new records to process.")
-            return
-
-        new_entries = content[self.rec_count:]
-        logger.info(f"Processing {len(new_entries)} new entries from attlog.json")
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
         
-        try:
-            conn = sqlite3.connect(self.db_name)
-            cursor = conn.cursor()
-        except sqlite3.Error as e:
-            logger.error(f"Database connection error: {e}")
-            return
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ZKID TEXT,
+            Timestamp TEXT,
+            InorOut INTEGER,
+            attype INTEGER,
+            Device TEXT,
+            SN TEXT,
+            Devrec TEXT,
+            RESPONSE TEXT,
+            KEY TEXT,
+            FTID TEXT
+        )
+        ''')
 
-        try:
-            cursor.execute('''
-            CREATE TABLE IF NOT EXISTS attendance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ZKID TEXT,
-                Timestamp TEXT,
-                InorOut INTEGER,
-                attype INTEGER,
-                Device TEXT,
-                SN TEXT,
-                Devrec TEXT
-            )
-            ''')
-        except sqlite3.Error as e:
-            logger.error(f"Error creating attendance table: {e}")
-            conn.close()
-            return
-
-        for entry in new_entries:
-            logger.debug(f"Processing entry: {entry}")
+        record_count = get_record_count()
+        new_count = record_count
+        
+        for entry in content[record_count:]:
             if all(key in entry for key in ('ZKID', 'Timestamp', 'InorOut', 'attype', 'Device', 'SN')):
                 try:
                     formatted_timestamp = datetime.strptime(entry['Timestamp'], "%Y/%m/%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
                 except ValueError as e:
                     logger.error(f"Invalid Timestamp format: {entry['Timestamp']} - {e}")
                     continue
-                
+
                 try:
                     cursor.execute('''
                         INSERT INTO attendance (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''', (entry['ZKID'], formatted_timestamp, entry['InorOut'], entry['attype'], entry['Device'], entry['SN'], entry.get('Devrec', '')))
-                    logger.info(f"Inserted record: {entry}")
+                    new_count += 1
                 except sqlite3.Error as e:
                     logger.error(f"Failed to insert record: {e}")
 
-        try:
-            conn.commit()
-            self.rec_count += len(new_entries)
-            self.settings["System para"][0]["Rec Count"] = str(self.rec_count)
-            save_settings(self.settings)
-            logger.info(f"Updated record count: {self.rec_count}")
-        except sqlite3.Error as e:
-            logger.error(f"Failed to commit transaction: {e}")
-        finally:
-            conn.close()
+        conn.commit()
+        conn.close()
+
+        update_record_count(new_count)
+        logger.info("Attendance records have been successfully inserted into the PUSH.db database.")
 
     def run(self):
         try:
             while True:
                 self.process_attlog_file()
-                time.sleep(10)  # Wait 10 seconds before checking again
+                time.sleep(10)
         except KeyboardInterrupt:
             logger.info("Script stopped by user.")
 
