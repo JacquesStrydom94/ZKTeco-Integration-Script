@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import os
 import logging
+import psutil
 from datetime import datetime
 from Post import PostScript
 from Dbcon import Dbcon
@@ -77,8 +78,6 @@ def check_db():
         conn.close()
 
 async def main():
-    import os  # Ensure os is imported
-    
     with open('server.log', 'a') as log_file:
         with redirect_stdout(log_file), redirect_stderr(log_file):
             check_db()
