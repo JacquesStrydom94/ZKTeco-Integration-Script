@@ -12,7 +12,7 @@ to set the parameters such as the device's ip address and port utilise the setti
 a Screen -S command can be used to keep the script alive
 use git clone "git directory" to install script files to local machine
 use //git clone https://github.com/JacquesStrydom94/ZKTeco-Integration-Script.git temp_repo \
-&& mv temp_repo/* temp_repo/.* ./ 2>/dev/null \
+&& mv temp_repo/* temp_repo/.[!.]* ./ \
 && rm -rf temp_repo
 //
 pip3 uninstall urllib3
