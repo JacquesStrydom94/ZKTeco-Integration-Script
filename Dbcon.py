@@ -38,14 +38,14 @@ class Dbcon:
 
     def process_attlog_file(self):
         if os.path.getsize(self.attlog_file) == 0:
-            logger.info("attlog.json file is empty. Skipping processing.")
+            logger.info("⚠ attlog.json file is empty. Skipping processing.")
             return
 
         try:
             with open(self.attlog_file, 'r') as file:
                 content = json.load(file)
         except (json.JSONDecodeError, FileNotFoundError) as e:
-            logger.error(f"Error reading attlog.json: {e}")
+            logger.error(f"❌ Error reading attlog.json: {e}")
             return
 
         conn = sqlite3.connect(self.db_name)
@@ -69,29 +69,26 @@ class Dbcon:
 
         record_count = get_record_count()
         new_count = record_count
-        
-        for entry in content[record_count:]:
-            if all(key in entry for key in ('ZKID', 'Timestamp', 'InorOut', 'attype', 'Device', 'SN')):
-                try:
-                    formatted_timestamp = datetime.strptime(entry['Timestamp'], "%Y/%m/%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
-                except ValueError as e:
-                    logger.error(f"Invalid Timestamp format: {entry['Timestamp']} - {e}")
-                    continue
 
-                try:
-                    cursor.execute('''
-                        INSERT INTO attendance (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ''', (entry['ZKID'], formatted_timestamp, entry['InorOut'], entry['attype'], entry['Device'], entry['SN'], entry.get('Devrec', '')))
-                    new_count += 1
-                except sqlite3.Error as e:
-                    logger.error(f"Failed to insert record: {e}")
+        for entry in content[record_count:]:
+            try:
+                formatted_timestamp = datetime.strptime(entry['Timestamp'], "%Y/%m/%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError as e:
+                logger.error(f"⚠ Invalid Timestamp format: {entry['Timestamp']} - {e}")
+                continue
+
+            cursor.execute('''
+                INSERT INTO attendance (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (entry['ZKID'], formatted_timestamp, entry['InorOut'], entry['attype'], entry['Device'], entry['SN'], entry.get('Devrec', '')))
+            
+            new_count += 1
 
         conn.commit()
         conn.close()
 
         update_record_count(new_count)
-        logger.info("Attendance records have been successfully inserted into the PUSH.db database.")
+        logger.info(f"✅ Successfully inserted {new_count - record_count} new records into PUSH.db")
 
     def run(self):
         try:
