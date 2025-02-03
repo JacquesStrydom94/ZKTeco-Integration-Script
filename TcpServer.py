@@ -13,12 +13,6 @@ MAX_BUFFER_SIZE = 2097152  # 2MB buffer size
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-def load_settings():
-    if not os.path.exists(SETTINGS_FILE):
-        return {"devices": []}
-    with open(SETTINGS_FILE, "r") as file:
-        return json.load(file)
-
 class TcpServer:
     def __init__(self, settings_file):
         self.settings_file = settings_file
@@ -41,19 +35,71 @@ class TcpServer:
         )
         conn.sendall(response.encode('utf-8'))
 
+    def extract_attlog(self, data):
+        """Extract ATTLOG records from TCP POST request."""
+        lines = data.split("\n")
+        start_idx = None
+        for i, line in enumerate(lines):
+            if line.strip() == "":  # The actual data starts after an empty line
+                start_idx = i + 1
+                break
+        
+        if start_idx is None or start_idx >= len(lines):
+            return None
+
+        return "\n".join(lines[start_idx:])  # Extract only the log data
+
+    def write_to_attlog(self, log_data):
+        """Write ATTLOG data to attlog.json safely."""
+        if not os.path.exists(ATTLOG_FILE):
+            with open(ATTLOG_FILE, 'w') as f:
+                json.dump([], f)
+
+        try:
+            with open(ATTLOG_FILE, 'r+') as f:
+                content = json.load(f)
+                log_entries = log_data.strip().split("\n")
+
+                for entry in log_entries:
+                    parts = entry.split()
+                    if len(parts) < 2:
+                        continue  # Skip invalid lines
+
+                    log_entry = {
+                        "ZKID": parts[0],
+                        "Timestamp": parts[1] + " " + parts[2],  # Combine date & time
+                        "InorOut": parts[3],
+                        "attype": parts[4],
+                        "Device": "Unknown",  # Update based on your logic
+                        "SN": "Unknown",  # Extract this if available in the request
+                        "Devrec": "N/A"
+                    }
+                    content.append(log_entry)
+
+                f.seek(0)
+                json.dump(content, f, indent=4)
+
+            logger.info(f"✅ Successfully wrote {len(log_entries)} entries to attlog.json")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Error writing to attlog.json: {e}")
+
     def handle_client(self, conn, addr, port):
+        """Handles an individual client connection."""
         logger.info(f"🚀 Connection established from {addr} on port {port}")
 
         while self.running:
             try:
-                data = conn.recv(MAX_BUFFER_SIZE)
+                data = conn.recv(MAX_BUFFER_SIZE).decode('utf-8', errors='ignore')
                 if not data:
                     logger.info(f"❌ Connection lost from {addr}. Reconnecting...")
                     break
 
-                decoded_data = data.decode('utf-8', errors='ignore')
-                logger.info(f"📥 Received Data from {addr}: {decoded_data}")
-                self.queue.put(decoded_data)
+                logger.info(f"📥 Received Data from {addr}: {data}")
+
+                attlog_data = self.extract_attlog(data)
+                if attlog_data:
+                    self.write_to_attlog(attlog_data)
 
                 self.send_http_response(conn)
 
