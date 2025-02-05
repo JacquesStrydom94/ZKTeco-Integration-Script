@@ -29,9 +29,6 @@ class TcpServer:
     def extract_attlog(self, data_str):
         """Extracts ATTLOG data from incoming TCP packets."""
         try:
-            if "=ATTLOG&Stamp=9999" not in data_str:
-                return None  # Ignore non-ATTLOG data
-
             lines = data_str.strip().split("\n")
             attlog_entries = [line.strip() for line in lines if line.strip() and not line.startswith("GET")]
             return "\n".join(attlog_entries)  # Join valid lines into a single string
@@ -98,11 +95,11 @@ class TcpServer:
                     break  # Exit loop if no data is received
 
                 data_str = data.decode('utf-8', errors='ignore')
-                logger.info(f"📥 Received Data from {addr}: {data_str}")
+                logger.info(f"📥 Received Data from {addr}:\n{data_str}\n{'-'*60}")
 
-                # ✅ Ensure only ATTLOG data is processed
+                # ✅ Log all TCP data, even if it's not ATTLOG
                 if "=ATTLOG&Stamp=9999" not in data_str:
-                    logger.warning(f"⚠ Skipping non-ATTLOG data from {addr}: {data_str[:100]}...")  # Log first 100 chars
+                    logger.warning(f"⚠ Received Non-ATTLOG Data (IGNORED): {data_str[:200]}...")  # Log first 200 chars
                     continue  # Skip processing this data
 
                 # Extract ATTLOG data after the header
