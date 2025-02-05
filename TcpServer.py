@@ -1,80 +1,82 @@
-import json
 import socket
-import logging
 import threading
+import json
 import os
-import time
-from queue import Queue
+import logging
+from datetime import datetime
 
-SETTINGS_FILE = "Settings.json"
+# Set the maximum buffer size per connection attempt (2 MB)
+MAX_BUFFER_SIZE = 2097152  # 2 MB
 ATTLOG_FILE = "attlog.json"
-MAX_BUFFER_SIZE = 2097152  # 2MB buffer size
+SETTINGS_FILE = "Settings.json"
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Logger Configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
+
 
 class TcpServer:
     def __init__(self, settings_file):
         self.settings_file = settings_file
         self.load_settings()
-        self.queue = Queue()
-        self.running = True
 
     def load_settings(self):
+        """Loads device configurations from Settings.json."""
         with open(self.settings_file, "r") as file:
             self.settings = json.load(file)
-        self.devices = self.settings.get("devices", [])
+        self.devices = self.settings.get("devices", [])  # Load all devices
 
-    def send_http_response(self, conn):
-        response = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Connection: Keep-Alive\r\n"
-            "\r\n"
-            "OK"
-        )
-        conn.sendall(response.encode('utf-8'))
+    def extract_attlog(self, data_str):
+        """Extracts ATTLOG data from incoming TCP packets."""
+        try:
+            if "=ATTLOG&Stamp=9999" not in data_str:
+                return None  # Ignore non-ATTLOG data
 
-    def extract_attlog(self, data):
-        """Extract ATTLOG records from TCP POST request."""
-        lines = data.split("\n")
-        start_idx = None
-        for i, line in enumerate(lines):
-            if line.strip() == "":  # The actual data starts after an empty line
-                start_idx = i + 1
-                break
-        
-        if start_idx is None or start_idx >= len(lines):
+            lines = data_str.strip().split("\n")
+            attlog_entries = [line.strip() for line in lines if line.strip() and not line.startswith("GET")]
+            return "\n".join(attlog_entries)  # Join valid lines into a single string
+        except Exception as e:
+            logger.error(f"❌ Error extracting ATTLOG data: {e}")
             return None
 
-        return "\n".join(lines[start_idx:])  # Extract only the log data
-
     def write_to_attlog(self, log_data):
-        """Write ATTLOG data to attlog.json safely."""
+        """Safely writes ATTLOG data to attlog.json, skipping malformed entries."""
         if not os.path.exists(ATTLOG_FILE):
             with open(ATTLOG_FILE, 'w') as f:
                 json.dump([], f)
 
         try:
             with open(ATTLOG_FILE, 'r+') as f:
-                content = json.load(f)
+                try:
+                    content = json.load(f)  # Load existing data
+                except json.JSONDecodeError:
+                    content = []  # If JSON is corrupted, reset to an empty list
+
                 log_entries = log_data.strip().split("\n")
 
                 for entry in log_entries:
                     parts = entry.split()
-                    if len(parts) < 2:
-                        continue  # Skip invalid lines
 
-                    log_entry = {
-                        "ZKID": parts[0],
-                        "Timestamp": parts[1] + " " + parts[2],  # Combine date & time
-                        "InorOut": parts[3],
-                        "attype": parts[4],
-                        "Device": "Unknown",  # Update based on your logic
-                        "SN": "Unknown",  # Extract this if available in the request
-                        "Devrec": "N/A"
-                    }
-                    content.append(log_entry)
+                    # ✅ Ensure data has at least 5 fields before processing
+                    if len(parts) < 5:
+                        logger.warning(f"⚠ Skipping malformed entry (not enough fields): {entry}")
+                        continue  # Skip invalid data
+
+                    try:
+                        log_entry = {
+                            "ZKID": parts[0],
+                            "Timestamp": f"{parts[1]} {parts[2]}" if len(parts) > 2 else "Unknown",
+                            "InorOut": int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,  # Default to 0
+                            "attype": int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,  # Default to 0
+                            "Device": "Unknown",
+                            "SN": "Unknown",
+                            "Devrec": "N/A"
+                        }
+                        content.append(log_entry)
+
+                    except ValueError as e:
+                        logger.error(f"❌ Invalid data format in entry: {entry} | Error: {e}")
+                        continue  # Skip this entry instead of crashing
 
                 f.seek(0)
                 json.dump(content, f, indent=4)
@@ -82,63 +84,63 @@ class TcpServer:
             logger.info(f"✅ Successfully wrote {len(log_entries)} entries to attlog.json")
 
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Error writing to attlog.json: {e}")
+            logger.error(f"❌ Error reading/writing attlog.json: {e}")
 
-    def handle_client(self, conn, addr, port):
-        """Handles an individual client connection."""
-        logger.info(f"🚀 Connection established from {addr} on port {port}")
+    def handle_client(self, client_socket, addr, port):
+        """Handles incoming TCP client connections securely."""
+        try:
+            logger.info(f"🚀 Connection established from {addr} on port {port}")
 
-        while self.running:
-            try:
-                data = conn.recv(MAX_BUFFER_SIZE).decode('utf-8', errors='ignore')
+            while True:
+                data = client_socket.recv(MAX_BUFFER_SIZE)
                 if not data:
                     logger.info(f"❌ Connection lost from {addr}. Reconnecting...")
-                    break
+                    break  # Exit loop if no data is received
 
-                logger.info(f"📥 Received Data from {addr}: {data}")
+                data_str = data.decode('utf-8', errors='ignore')
+                logger.info(f"📥 Received Data from {addr}: {data_str}")
 
-                attlog_data = self.extract_attlog(data)
+                # ✅ Ensure only ATTLOG data is processed
+                if "=ATTLOG&Stamp=9999" not in data_str:
+                    logger.warning(f"⚠ Skipping non-ATTLOG data from {addr}: {data_str[:100]}...")  # Log first 100 chars
+                    continue  # Skip processing this data
+
+                # Extract ATTLOG data after the header
+                attlog_data = self.extract_attlog(data_str)
                 if attlog_data:
                     self.write_to_attlog(attlog_data)
 
-                self.send_http_response(conn)
-
-            except socket.error as e:
-                logger.error(f"⚠ Connection error with {addr}: {e}")
-                break
-
-        conn.close()
-        time.sleep(2)
-
-    def start_listener(self, port):
-        while self.running:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    server_socket.bind(("0.0.0.0", port))
-                    server_socket.listen(5)
-                    logger.info(f"✅ Listening for connections on 0.0.0.0:{port}")
-
-                    while self.running:
-                        conn, addr = server_socket.accept()
-                        client_thread = threading.Thread(target=self.handle_client, args=(conn, addr, port))
-                        client_thread.start()
-
-            except Exception as e:
-                logger.error(f"❌ Error on port {port}: {e}")
-                time.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ Error in handle_client: {e}")
+        finally:
+            client_socket.close()
+            logger.info(f"🔌 Connection closed: {addr}")
 
     def start_server(self):
+        """Starts the TCP server for each configured device."""
         threads = []
         for device in self.devices:
-            port = device.get("port")
-            if port:
-                thread = threading.Thread(target=self.start_listener, args=(port,))
-                thread.start()
-                threads.append(thread)
+            ip, port = device["ip"], device["port"]
+            thread = threading.Thread(target=self.listen_for_connections, args=(ip, port))
+            threads.append(thread)
+            thread.start()
 
         for thread in threads:
             thread.join()
+
+    def listen_for_connections(self, host, port):
+        """Listens for incoming TCP connections on the specified host and port."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind((host, port))
+            server_socket.listen(5)
+            logger.info(f"✅ Listening for connections on {host}:{port}")
+
+            while True:
+                client_socket, addr = server_socket.accept()
+                client_thread = threading.Thread(target=self.handle_client, args=(client_socket, addr, port))
+                client_thread.start()
+
 
 if __name__ == "__main__":
     tcp_server = TcpServer(SETTINGS_FILE)
