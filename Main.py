@@ -76,14 +76,14 @@ def check_db():
         conn.close()
 
 async def main():
-    """Main function to start all services with execution pausing until conditions are met."""
-    event = asyncio.Event()  # Event to control pausing and resuming execution
+    """Main function to start all services but pause them at the specified time."""
+    pause_event = asyncio.Event()  # Event to control pausing services
+    pause_event.set()  # Initially allow execution
 
     with open('server.log', 'a') as log_file:
         with redirect_stdout(log_file), redirect_stderr(log_file):
             logger.info("Starting scripts...")
-            
-            # Check if the database exists and set up tables if needed
+
             check_db()
 
             settings_file = "Settings.json"
@@ -92,16 +92,20 @@ async def main():
             s1 = PostScript(settings_file=settings_file)
             s2 = Dbcon()
             s3 = TcpServer(settings_file)
-            s4 = CmdScriptModule.Cmd(settings_file, event)  # Pass event to Cmd
+            s4 = CmdScriptModule.Cmd(settings_file, pause_event)  # Pass event to Cmd
 
-            # Wait until the specified time and conditions are met before starting other processes
-            await s4.wait_until_specified_time()
+            # Start services immediately but allow pausing
+            async def run_with_pause(task):
+                while True:
+                    await pause_event.wait()  # Wait until unpaused
+                    await asyncio.to_thread(task)
 
-            # After conditions are met, resume execution
+            # Run all tasks, allowing pausing for PostScript, Dbcon, and TcpServer
             await asyncio.gather(
-                asyncio.to_thread(s1.post_and_update_records),
-                asyncio.to_thread(s2.run),
-                asyncio.to_thread(s3.start_server),
+                run_with_pause(s1.post_and_update_records),
+                run_with_pause(s2.run),
+                run_with_pause(s3.start_server),
+                s4.wait_until_specified_time(),  # Handles pausing/resuming logic
             )
 
             logger.info("Scripts resumed and running normally.")
