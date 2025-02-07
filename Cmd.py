@@ -1,146 +1,51 @@
-import socket
-import threading
-import json
+import asyncio
+import sqlite3
 import os
 import logging
-from datetime import datetime, timezone, timedelta
-import time
+import sys
+from contextlib import redirect_stdout, redirect_stderr
+import importlib.util
+from Post import PostScript
+from Dbcon import Dbcon
+from TcpServer import TcpServer
 
-class CustomFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, timezone.utc)
-        return dt.strftime('%Y-%m-%d %H:%M:%S:%f')
+# Dynamic import of Cmd
+spec = importlib.util.spec_from_file_location("CmdScriptModule", "Cmd.py")
+CmdScriptModule = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(CmdScriptModule)
 
-logging.basicConfig(level=logging.INFO, format='%(message)s', handlers=[
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', handlers=[
     logging.FileHandler("server.log"),
-    logging.StreamHandler()
+    logging.StreamHandler(sys.stdout)
 ])
 logger = logging.getLogger()
-formatter = CustomFormatter()
-for handler in logger.handlers:
-    handler.setFormatter(formatter)
 
-class Cmd:
-    def __init__(self, settings_file):
-        self.settings_file = settings_file
-        self.load_settings()
-        self.cmd_count_file = "cmd_count.json"
-        self.cmd_count = self.load_cmd_count()
+async def main():
+    """Main function to start all services with execution pausing until conditions are met."""
+    event = asyncio.Event()  # Event to pause and resume execution
 
-    def load_settings(self):
-        with open(self.settings_file, "r") as file:
-            data = json.load(file)
-            self.target_time = data["settings"]["target_time"]
-            self.cmd_template = data["settings"]["cmd"]
-            self.devices = data["devices"]  # Load all devices
+    with open('server.log', 'a') as log_file:
+        with redirect_stdout(log_file), redirect_stderr(log_file):
+            logger.info("Starting scripts...")
+            settings_file = "Settings.json"
 
-    def load_cmd_count(self):
-        if os.path.exists(self.cmd_count_file):
-            with open(self.cmd_count_file, "r") as file:
-                data = json.load(file)
-                return data.get("cmd_count", 0)
-        else:
-            with open(self.cmd_count_file, "w") as file:
-                json.dump({"cmd_count": 0}, file)
-            return 0
+            s1 = PostScript(settings_file=settings_file)
+            s2 = Dbcon()
+            s3 = TcpServer(settings_file)
+            s4 = CmdScriptModule.Cmd(settings_file, event)  # Pass event to Cmd
 
-    def save_cmd_count(self, count):
-        with open(self.cmd_count_file, "w") as file:
-            json.dump({"cmd_count": count}, file)
+            # Wait until conditions are met
+            await s4.wait_until_specified_time()
 
-    def handle_client(self, client_socket):
-        try:
-            while True:
-                # Generate cmd with the current date before sending to the client
-                start_time = datetime.now().strftime('%Y/%m/%d')
-                end_time = datetime.now().strftime('%Y/%m/%d')
-                cmd = self.cmd_template.replace("startTime", start_time).replace("endTime", end_time)
-                message = f"C:{self.cmd_count}:{cmd}"
-                client_socket.sendall(message.encode('utf-8'))
-                logger.info("Server Send Data: {} - {}".format(
-                    datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f'),
-                    message))
+            # After conditions are met, resume execution
+            await asyncio.gather(
+                asyncio.to_thread(s1.post_and_update_records),
+                asyncio.to_thread(s2.run),
+                asyncio.to_thread(s3.start_server),
+            )
 
-                command_sent = False
-
-                while True:
-                    try:
-                        response = client_socket.recv(1024).decode('utf-8')
-                        if response:
-                            logger.info("Client Response: {} - {}".format(
-                                datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f'),
-                                response))
-                            # Send "OK" immediately after receiving any content
-                            client_socket.sendall("OK".encode('utf-8'))
-
-                            if not command_sent and f"ID={self.cmd_count}&Return=0&CMD=" in response:
-                                self.cmd_count += 1
-                                self.save_cmd_count(self.cmd_count)
-
-                                # Send HTTP response back to the client
-                                date_now = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-                                http_response = (
-                                    "HTTP/1.1 200 OK\n"
-                                    "Content-Type: text/plain\n"
-                                    "Accept-Ranges: bytes\n"
-                                    f"Date: {date_now}\n"
-                                    "Content-Length: 4\n"
-                                )
-                                client_socket.sendall(http_response.encode('utf-8'))
-                                
-                                command_sent = True  # Set flag to indicate the command was sent
-                            else:
-                                # After the command is sent, only receive data
-                                logger.info("Only receiving data")
-                        
-                    except socket.error as e:
-                        logger.error(f"Socket error: {e.strerror} (Error code: {e.errno})")
-                    except Exception as e:
-                        logger.error(f"Error receiving data from client: {e}")
-
-                    time.sleep(1)
-
-        except Exception as e:
-            logger.error(f"Error handling client: {e}")
-        finally:
-            if client_socket:
-                client_socket.close()
-            logger.info("Client connection closed")
-
-    def start_server(self, port):
-        server_address = ("0.0.0.0", port)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-            server_socket.bind(server_address)
-            server_socket.listen(5)
-            logger.info(f"Server listening on 0.0.0.0:{port}")
-
-            while True:
-                client_socket, addr = server_socket.accept()
-                logger.info(f"Accepted connection from {addr}")
-
-                client_handler = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket,)
-                )
-                client_handler.start()
-
-    def wait_until_specified_time(self):
-        now = datetime.now()
-        target_hour, target_minute = map(int, self.target_time.split(":"))
-        target_datetime = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=target_hour, minutes=target_minute)
-        if target_datetime <= now:
-            target_datetime += timedelta(days=1)
-        time_until_target = (target_datetime - now).total_seconds()
-        time.sleep(time_until_target)
-        logger.info(f"It's {self.target_time}! Starting the server...")
-
-        # Start server for each device
-        for device in self.devices:
-            port = device["port"]
-            server_thread = threading.Thread(target=self.start_server, args=(port,))
-            server_thread.start()
+            logger.info("Scripts resumed and running normally.")
 
 if __name__ == "__main__":
-    settings_file = "Settings.json"
-    cmd = Cmd(settings_file)
-    cmd.wait_until_specified_time()
+    asyncio.run(main())
