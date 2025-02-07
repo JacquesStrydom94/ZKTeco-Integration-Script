@@ -4,12 +4,13 @@ import threading
 import json
 import os
 import logging
+import ntplib
 from datetime import datetime, timezone, timedelta
 
 class Cmd:
     def __init__(self, settings_file, pause_event):
         self.settings_file = settings_file
-        self.pause_event = pause_event  # Event for pausing and resuming
+        self.pause_event = pause_event  # Controls when services pause/resume
         self.load_settings()
         self.cmd_count_file = "cmd_count.json"
         self.cmd_count = self.load_cmd_count()
@@ -39,28 +40,39 @@ class Cmd:
         with open(self.cmd_count_file, "w") as file:
             json.dump({"cmd_count": count}, file)
 
+    def get_ntp_time(self):
+        """Fetch the accurate time from an NTP server and adjust to GMT+2."""
+        ntp_client = ntplib.NTPClient()
+        try:
+            response = ntp_client.request("pool.ntp.org", version=3)  # Using a reliable NTP server
+            utc_time = datetime.utcfromtimestamp(response.tx_time).replace(tzinfo=timezone.utc)
+            gmt_plus_2_time = utc_time + timedelta(hours=2)  # Convert to GMT+2
+            return gmt_plus_2_time
+        except Exception as e:
+            logging.error(f"Failed to get time from NTP server: {e}")
+            return datetime.now(timezone.utc) + timedelta(hours=2)  # Fallback to system time
+
     async def wait_until_specified_time(self):
-        """Pause all services at the target time, check conditions, then resume execution."""
-        now = datetime.now()
+        """Pause all services at the exact target time in GMT+2."""
+        now = self.get_ntp_time()
         target_hour, target_minute = map(int, self.target_time.split(":"))
-        target_datetime = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=target_hour, minutes=target_minute)
+        target_datetime = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
 
         if target_datetime <= now:
-            target_datetime += timedelta(days=1)
+            target_datetime += timedelta(days=1)  # If time has passed, schedule for the next day
 
         time_until_target = (target_datetime - now).total_seconds()
-        logging.info(f"Waiting {time_until_target / 60:.2f} minutes until {self.target_time}.")
+        logging.info(f"Waiting {time_until_target / 60:.2f} minutes until {self.target_time} GMT+2.")
         await asyncio.sleep(time_until_target)  # Non-blocking wait
 
-        logging.info(f"Reached {self.target_time}, pausing services...")
+        logging.info(f"Reached {self.target_time} GMT+2, pausing services...")
+        self.pause_event.clear()  # PAUSE all other services
 
-        self.pause_event.clear()  # PAUSE all other tasks
-
-        # Handle client connections (this was part of the original script)
+        # Start the TCP servers for all devices
         for device in self.devices:
             threading.Thread(target=self.start_server, args=(device["port"],)).start()
 
-        # Perform necessary checks before resuming
+        # Check conditions before resuming services
         while True:
             condition_met = os.path.exists("ready_signal.txt")  # Example condition
 
