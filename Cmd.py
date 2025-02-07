@@ -14,6 +14,7 @@ class Cmd:
         self.load_settings()
         self.cmd_count_file = "cmd_count.json"
         self.cmd_count = self.load_cmd_count()
+        self.response_received = asyncio.Event()  # Signal when correct response is received
 
     def load_settings(self):
         """Load settings from a JSON file."""
@@ -72,17 +73,11 @@ class Cmd:
         for device in self.devices:
             threading.Thread(target=self.start_server, args=(device["port"],)).start()
 
-        # Check conditions before resuming services
-        while True:
-            condition_met = os.path.exists("ready_signal.txt")  # Example condition
+        # Wait until the correct TCP response is received
+        logging.info("Waiting for valid TCP response before resuming services...")
+        await self.response_received.wait()  # Wait until TCP response condition is met
 
-            if condition_met:
-                break  # Exit loop when condition is met
-            
-            logging.info("Condition not met. Waiting...")
-            await asyncio.sleep(5)  # Recheck every 5 seconds
-
-        logging.info("Condition met. Resuming all services.")
+        logging.info("Valid TCP response received. Resuming all services.")
         self.pause_event.set()  # RESUME all services
 
     def handle_client(self, client_socket):
@@ -111,6 +106,9 @@ class Cmd:
                         if not command_sent and f"ID={self.cmd_count}&Return=0&CMD=" in response:
                             self.cmd_count += 1
                             self.save_cmd_count(self.cmd_count)
+
+                            # Notify that the correct response has been received
+                            self.response_received.set()
 
                             # Send HTTP response
                             date_now = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
