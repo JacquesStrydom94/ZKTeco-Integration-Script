@@ -8,18 +8,12 @@ import importlib.util
 from Post import PostScript
 from Dbcon import Dbcon
 from TcpServer import TcpServer
+from logger_setup import logger  # Import improved logging setup
 
 # Dynamic import of Cmd
 spec = importlib.util.spec_from_file_location("CmdScriptModule", "Cmd.py")
 CmdScriptModule = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(CmdScriptModule)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', handlers=[
-    logging.FileHandler("server.log"),
-    logging.StreamHandler(sys.stdout)
-])
-logger = logging.getLogger()
 
 def check_db():
     """Ensure the SQLite database and required tables exist."""
@@ -82,7 +76,7 @@ async def main():
 
     with open('server.log', 'a') as log_file:
         with redirect_stdout(log_file), redirect_stderr(log_file):
-            logger.info("Starting scripts...")
+            logger.info("🚀 Starting scripts...")
 
             check_db()
 
@@ -108,7 +102,7 @@ async def main():
                 s4.wait_until_specified_time(),  # Handles pausing/resuming logic
             )
 
-            logger.info("Scripts resumed and running normally.")
+            logger.info("✅ Scripts resumed and running normally.")
 
 if __name__ == "__main__":
     asyncio.run(main())
