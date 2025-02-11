@@ -1,6 +1,6 @@
 {
     "settings": {
-        "target_time": "15:05",
+        "target_time": "23:00",
         "cmd": "DATA QUERY ATTLOG StartTime=startTime EndTime=endTime"
     },
     "logs": [
