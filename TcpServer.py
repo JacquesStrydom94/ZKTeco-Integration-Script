@@ -24,9 +24,14 @@ class TcpServer:
 
     def load_settings(self):
         """Load settings from Settings.json."""
+        if not os.path.exists(self.settings_file):
+            logger.error(f"⚠️ Settings file '{self.settings_file}' not found. Exiting...")
+            exit(1)
+
         with open(self.settings_file, "r") as file:
             self.settings = json.load(file)
-        self.devices = self.settings.get("devices", [])
+
+        self.ports = [entry["port"] for entry in self.settings.get("devices", []) if "port" in entry]
 
     def free_port(self, port):
         """Check and free a port if it's already in use."""
@@ -169,9 +174,13 @@ class TcpServer:
 
     def start_server(self):
         """Start the TCP server and listen for connections on all configured ports."""
+        if not self.ports:
+            logger.error("❌ No ports configured in Settings.json! Exiting...")
+            return
+
         threads = []
-        for device in self.devices:
-            thread = threading.Thread(target=self.listen_for_connections, args=(device["port"],))
+        for port in self.ports:
+            thread = threading.Thread(target=self.listen_for_connections, args=(port,))
             thread.start()
             threads.append(thread)
 
