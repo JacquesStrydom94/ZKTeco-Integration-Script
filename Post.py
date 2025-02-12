@@ -1,11 +1,10 @@
 import sqlite3
 import json
 import requests
-import os
 import time
 import logging
 from datetime import datetime
-from logger_setup import logger  # Import the improved logging setup
+from logger_setup import logger  # improved logging
 
 SETTINGS_FILE = "Settings.json"
 DB_NAME = "PUSH.db"
@@ -17,97 +16,105 @@ DEFAULT_SETTINGS = {
     ]
 }
 
-def load_settings():
-    """Load settings from the JSON file, reset to default if corrupted or missing."""
-    if not os.path.exists(SETTINGS_FILE):
-        logger.warning("⚠️ Settings.json not found. Creating a new one with default values.")
-        save_settings(DEFAULT_SETTINGS)
-        return DEFAULT_SETTINGS
-
+def load_settings(settings_file=SETTINGS_FILE):
     try:
-        with open(SETTINGS_FILE, "r") as file:
+        with open(settings_file, "r") as file:
             return json.load(file)
-    except (json.JSONDecodeError, ValueError):
-        logger.error("❌ Settings.json is corrupted. Resetting to default values.")
-        save_settings(DEFAULT_SETTINGS)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.error(f"❌ {settings_file} missing or corrupted. Using default settings.")
         return DEFAULT_SETTINGS
-
-def save_settings(data):
-    """Save settings to the JSON file."""
-    with open(SETTINGS_FILE, "w") as file:
-        json.dump(data, file, indent=4)
 
 class PostScript:
     def __init__(self, settings_file=SETTINGS_FILE, db_name=DB_NAME):
-        self.config = load_settings()
+        self.config = load_settings(settings_file)
         self.DBID = self.config["logs"][0].get("DBID", "")
         self.Token = self.config["logs"][1].get("Token", "")
         self.db_name = db_name
-        self.last_processed_id = 0
+        self.last_processed_id = 0  # track last posted record's ID
 
     def fetch_new_records(self):
-        """Fetch new attendance records that have not been processed."""
+        """Fetch un-posted records from 'attendance' table."""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM attendance WHERE id > ? AND RESPONSE IS NULL", (self.last_processed_id,))
+        # We rely on 'RESPONSE IS NULL' to know un-posted
+        cursor.execute("""
+            SELECT id, ZKID, Timestamp, InorOut, attype, Device, SN, Devrec
+            FROM attendance
+            WHERE (RESPONSE IS NULL OR RESPONSE = '')
+              AND id > ?
+            ORDER BY id ASC
+        """, (self.last_processed_id,))
         records = cursor.fetchall()
-        column_names = [description[0] for description in cursor.description]
         conn.close()
-        return records, column_names
+        return records
 
     def post_and_update_records(self):
-        """Post new records to the API and update the database with the response."""
+        """Continuously post new records to the API and update DB with the response."""
         while True:
-            records, column_names = self.fetch_new_records()
-            
-            for record in records:
-                record_dict = {column: value for column, value in zip(column_names, record) if column not in ["id", "FTID", "RESPONSE", "KEY"]}
-                
-                # Convert timestamp format if necessary
-                if isinstance(record_dict.get("Timestamp"), str) and '-' in record_dict["Timestamp"]:
-                    try:
-                        dt = datetime.strptime(record_dict["Timestamp"], "%Y-%m-%d %H:%M:%S")
-                        record_dict["Timestamp"] = dt.strftime("%Y/%m/%d %H:%M:%S")
-                    except ValueError:
-                        continue
-                
-                record_json = json.dumps(record_dict)
-                
+            records = self.fetch_new_records()
+
+            for row in records:
+                (rec_id, zkid, ts, inout, attyp, dev, sn, devrec) = row
+
+                # Convert timestamp if needed
+                # Already in 'YYYY-MM-DD HH:MM:SS'. If your API wants 'YYYY/MM/DD HH:MM:SS':
+                try:
+                    dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                    ts_for_api = dt.strftime("%Y/%m/%d %H:%M:%S")
+                except ValueError:
+                    ts_for_api = ts
+
+                record_dict = {
+                    "ZKID": zkid,
+                    "Timestamp": ts_for_api,
+                    "InorOut": inout,
+                    "attype": attyp,
+                    "Device": dev,
+                    "SN": sn,
+                    "Devrec": devrec
+                }
+
                 try:
                     response = requests.post(
                         f'https://appnostic.dbflex.net/secure/api/v2/{self.DBID}/{self.Token}/ZK_stage/create.json',
-                        data=record_json,
+                        json=record_dict,
                         headers={
                             'Content-Type': 'application/json',
                             'Authorization': f'Bearer {self.Token}'
-                        }
+                        },
+                        timeout=10
                     )
-                    
-                    if response.status_code == 200:
-                        response_data = response.json()[0]
-                        conn = sqlite3.connect(self.db_name)
-                        cursor = conn.cursor()
-                        cursor.execute("""
-                            UPDATE attendance 
-                            SET RESPONSE = ?, KEY = ?, FTID = ? 
-                            WHERE id = ?
-                        """, (response_data.get('status'), response_data.get('key'), response_data.get('id'), record[0]))
-                        conn.commit()
-                        conn.close()
-                        self.last_processed_id = record[0]
-                        logger.info(f"✅ Successfully processed record ID: {record[0]}")
-                    else:
-                        logger.error(f"❌ Failed to process record ID: {record[0]} - HTTP {response.status_code}")
-                
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"❌ HTTP request failed: {e}")
-            
-            time.sleep(10)
-    
-    def run(self):
-        """Start posting and updating records."""
-        self.post_and_update_records()
 
-if __name__ == "__main__":
-    post_script = PostScript()
-    post_script.run()
+                    if response.status_code == 200:
+                        # Expecting something like: [{"status": "...", "key": "...", "id": "..."}]
+                        data = response.json()
+                        if isinstance(data, list) and data:
+                            status_val = data[0].get('status', '')
+                            key_val = data[0].get('key', '')
+                            ftid_val = data[0].get('id', '')
+
+                            # Update DB
+                            conn = sqlite3.connect(self.db_name)
+                            cursor = conn.cursor()
+                            cursor.execute("""
+                                UPDATE attendance
+                                SET RESPONSE = ?, KEY = ?, FTID = ?
+                                WHERE id = ?
+                            """, (status_val, key_val, ftid_val, rec_id))
+                            conn.commit()
+                            conn.close()
+
+                            self.last_processed_id = rec_id
+                            logger.info(f"✅ Successfully posted record ID {rec_id}")
+                        else:
+                            logger.error(f"❌ Unexpected response structure: {response.text}")
+                    else:
+                        logger.error(f"❌ Post failed (HTTP {response.status_code}): {response.text}")
+
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"❌ HTTP error posting ID {rec_id}: {e}")
+
+            time.sleep(10)
+
+    def run(self):
+        self.post_and_update_records()
