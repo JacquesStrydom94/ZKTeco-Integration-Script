@@ -1,162 +1,251 @@
-import asyncio
 import socket
 import threading
 import json
 import os
 import logging
-import ntplib
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-class Cmd:
-    def __init__(self, settings_file, pause_event):
-        self.settings_file = settings_file
-        self.pause_event = pause_event  # Controls when services pause/resume
-        self.cmd_count_file = "cmd_count.json"
-        self.response_received = asyncio.Event()  # Signal when correct response is received
+# -------------------------------
+# LOGGING SETUP
+# -------------------------------
+class CustomFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, timezone.utc)
+        return dt.strftime('%Y-%m-%d %H:%M:%S:%f')
 
-        self.load_settings()  # Load parameters from Settings.json
-        self.cmd_count = self.load_cmd_count()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    handlers=[
+        logging.FileHandler("server.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger()
+formatter = CustomFormatter()
+for handler in logger.handlers:
+    handler.setFormatter(formatter)
 
-    def load_settings(self):
-        """Load settings from a JSON file."""
-        if not os.path.exists(self.settings_file):
-            logging.error(f"⚠️ Settings file '{self.settings_file}' not found.")
-            exit(1)
-        
-        with open(self.settings_file, "r") as file:
+# -------------------------------
+# GLOBALS
+# -------------------------------
+cmd_count_file = "cmd_count.json"
+settings_file = "Settings.json"
+
+# -------------------------------
+# LOAD / SAVE CMD_COUNT
+# -------------------------------
+def load_cmd_count():
+    """Loads the cmd_count from cmd_count.json or initializes it to 0."""
+    if os.path.exists(cmd_count_file):
+        with open(cmd_count_file, "r") as file:
             data = json.load(file)
-            self.target_time = data["settings"]["target_time"]
-            self.cmd_template = data["settings"]["cmd"]
-            self.device_ip = next((entry["ip"] for entry in data["devices"] if "ip" in entry), "127.0.0.1")
-            self.ports = [entry["port"] for entry in data["devices"] if "port" in entry]
-
-    def load_cmd_count(self):
-        """Load command count from a JSON file."""
-        if os.path.exists(self.cmd_count_file):
-            with open(self.cmd_count_file, "r") as file:
-                data = json.load(file)
-                return data.get("cmd_count", 0)
+            return data.get("cmd_count", 0)
+    else:
+        with open(cmd_count_file, "w") as file:
+            json.dump({"cmd_count": 0}, file)
         return 0
 
-    def save_cmd_count(self, count):
-        """Save the current command count to a file."""
-        with open(self.cmd_count_file, "w") as file:
-            json.dump({"cmd_count": count}, file)
+def save_cmd_count(count):
+    """Saves the cmd_count to cmd_count.json."""
+    with open(cmd_count_file, "w") as file:
+        json.dump({"cmd_count": count}, file)
 
-    def get_ntp_time(self):
-        """Fetch the accurate time from an NTP server and adjust to GMT+2."""
-        ntp_client = ntplib.NTPClient()
-        try:
-            response = ntp_client.request("pool.ntp.org", version=3)
-            utc_time = datetime.utcfromtimestamp(response.tx_time).replace(tzinfo=timezone.utc)
-            gmt_plus_2_time = utc_time + timedelta(hours=2)  # Convert to GMT+2
-            return gmt_plus_2_time
-        except Exception as e:
-            logging.error(f"❌ Failed to get time from NTP server: {e}")
-            return datetime.now(timezone.utc) + timedelta(hours=2)  # Fallback to system time
+cmd_count = load_cmd_count()
 
-    async def wait_until_specified_time(self):
-        """Pause all services at the exact target time in GMT+2."""
-        now = self.get_ntp_time()
-        target_hour, target_minute = map(int, self.target_time.split(":"))
-        target_datetime = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+# -------------------------------
+# READ SETTINGS.JSON
+# -------------------------------
+def load_settings():
+    """
+    Expects "devices" array in Settings.json, 
+    e.g.: "devices": [
+            {"ip": "1.2.3.4", "port": 5000},
+            {"ip": "1.2.3.4", "port": 5001}
+         ]
+    """
+    if not os.path.exists(settings_file):
+        logger.error(f"⚠️ Settings file '{settings_file}' not found. Exiting...")
+        os._exit(1)
 
-        if target_datetime <= now:
-            target_datetime += timedelta(days=1)  # If time has passed, schedule for the next day
+    try:
+        with open(settings_file, "r") as f:
+            data = json.load(f)
+            # Gather all (ip, port) pairs
+            devices = []
+            for dev in data.get("devices", []):
+                ip = dev.get("ip")
+                port = dev.get("port")
+                if ip and port:
+                    devices.append((ip, port))
+            return devices
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"❌ Error reading {settings_file}: {e}")
+        os._exit(1)
 
-        time_until_target = (target_datetime - now).total_seconds()
-        logging.info(f"⏳ Waiting {time_until_target / 60:.2f} minutes until {self.target_time} GMT+2.")
-        await asyncio.sleep(time_until_target)  # Non-blocking wait
+# -------------------------------
+# HTTP RESPONSE UTILITY
+# -------------------------------
+def send_http_response(client_socket, response_text, content_length):
+    """
+    Sends a minimal HTTP/1.1 200 response with the specified content length,
+    plus the actual message (response_text).
+    """
+    date_now = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    http_response = (
+        f"HTTP/1.1 200 OK\n"
+        f"Content-Type: text/plain\n"
+        f"Accept-Ranges: bytes\n"
+        f"Date: {date_now}\n"
+        f"Content-Length: {content_length}\n\n"
+    )
+    client_socket.sendall(http_response.encode('utf-8'))
+    logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\n{http_response}")
 
-        logging.info(f"⏰ Reached {self.target_time} GMT+2, pausing services...")
-        self.pause_event.clear()  # PAUSE all other services
+# -------------------------------
+# HANDLE CLIENT CONNECTION
+# -------------------------------
+def handle_client(client_socket):
+    global cmd_count
+    try:
+        response = client_socket.recv(4096).decode('utf-8', errors='ignore')
+        if response:
+            # Filter out ATTPHOTO to reduce log clutter
+            log_response = response.replace("ATTPHOTO", "[FILTERED]")
+            logger.info(f"Sever Receive Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\n{log_response}")
 
-        # Start sending commands to all ports using the public IP
-        for port in self.ports:
-            threading.Thread(target=self.send_command_to_device, args=(self.device_ip, port)).start()
+            # ---------------------------------------------
+            # 1) GET /iclock/cdata?SN=... &options=all...
+            # ---------------------------------------------
+            if (
+                "GET /iclock/cdata?SN=" in response and 
+                "&options=all&language=69&pushver=2.4.1&DeviceType=att&PushOptionsFlag=1" in response
+            ):
+                sn = response.split("SN=")[1].split("&")[0]
+                # a) Send HTTP 200 "OK"
+                send_http_response(client_socket, "OK", 450)
+                # b) Then send device options
+                option_response = (
+                    f"GET OPTION FROM:{sn}\n"
+                    "Stamp=9999\n"
+                    "OpStamp=9999\n"
+                    "PhotoStamp=0\n"
+                    "TransFlag=TransData AttLog\tOpLog\t[ATTPHOTO REMOVED]\tEnrollUser\tChgUser\tEnrollFP\tChgFP\tFPImag\tFACE\tUserPic\tWORKCODE\tBioPhoto\n"
+                    "ErrorDelay=120\n"
+                    "Delay=10\n"
+                    "TimeZone=120\n"
+                    "TransTimes=\n"
+                    "TransInterval=30\n"
+                    "SyncTime=0\n"
+                    "Realtime=1\n"
+                    "ServerVer=2.2.14 2025/02/12\n"
+                    "PushProtVer=2.4.1\n"
+                    "PushOptionsFlag=1\n"
+                    "ATTLOGStamp=9999\n"
+                    "OPERLOGStamp=9999\n"
+                    "ServerName=Logtime Server\n"
+                    "MultiBioDataSupport=0:1:0:0:0:0:0:0:0:0\n"
+                )
+                client_socket.sendall(option_response.encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\n[GET OPTION RESPONSE SENT]")
 
-        # Start listening for responses on all specified ports
-        for port in self.ports:
-            threading.Thread(target=self.start_server, args=(port,)).start()
+            # ---------------------------------------------
+            # 2) GET /iclock/getrequest?SN=...
+            # ---------------------------------------------
+            elif "GET /iclock/getrequest?SN=" in response:
+                # a) 200 "OK"
+                send_http_response(client_socket, "OK", 4)
+                client_socket.sendall("OK".encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\nOK\n")
 
-        # Wait until a valid response is received before resuming services
-        logging.info("⏳ Waiting for a valid TCP response before resuming services...")
-        await self.response_received.wait()
+                # b) Also send a command (DATA QUERY ...)
+                cmd_text = (
+                    f"C:{cmd_count}:DATA QUERY ATTLOG "
+                    f"StartTime={datetime.now().strftime('%Y/%m/%d')}\t"
+                    f"EndTime={datetime.now().strftime('%Y/%m/%d')}"
+                )
+                send_http_response(client_socket, cmd_text, len(cmd_text))
+                client_socket.sendall(cmd_text.encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\n{cmd_text}")
 
-        logging.info("✅ Valid TCP response received. Resuming all services.")
-        self.pause_event.set()  # RESUME all services
+            # ---------------------------------------------
+            # 3) POST /iclock/cdata?SN=... &table=OPERLOG...
+            # ---------------------------------------------
+            elif "POST /iclock/cdata?SN=" in response and "&table=OPERLOG&Stamp=" in response:
+                send_http_response(client_socket, "OK", 4)
+                client_socket.sendall("OK".encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\nOK\n")
 
-    def send_command_to_device(self, device_ip, port):
-        """Send a command to the given device IP and port."""
-        try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(5)
-            client_socket.connect((device_ip, port))
+            # ---------------------------------------------
+            # 4) POST /iclock/devicecmd?SN=...
+            # ---------------------------------------------
+            elif "POST /iclock/devicecmd?SN=" in response:
+                send_http_response(client_socket, "OK", 4)
+                client_socket.sendall("OK".encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\nOK\n")
 
-            # Generate command with the current date
-            start_time = datetime.now().strftime('%Y/%m/%d')
-            end_time = datetime.now().strftime('%Y/%m/%d')
-            cmd = self.cmd_template.replace("startTime", start_time).replace("endTime", end_time)
-            message = f"C:{self.cmd_count}:{cmd}"
+            # ---------------------------------------------
+            # 5) If device responds with "ID=xx &Return=0&CMD=DATA"
+            #    => increment cmd_count
+            # ---------------------------------------------
+            if "ID=" in response and "&Return=0&CMD=DATA" in response:
+                cmd_count += 1
+                save_cmd_count(cmd_count)
+                send_http_response(client_socket, "OK", 4)
+                client_socket.sendall("OK".encode('utf-8'))
+                logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\nOK\n")
 
-            client_socket.sendall(message.encode('utf-8'))
-            logging.info(f"📤 Sent data to {device_ip}:{port} - {message}")
+    except Exception as e:
+        logger.error(f"Error handling client: {e}")
+    finally:
+        client_socket.close()
+        logger.info(f"Sever Client Disconnected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}")
 
-            client_socket.close()
-
-        except socket.error as e:
-            logging.error(f"❌ Failed to send command to {device_ip}:{port} - {e}")
-
-    def start_server(self, port):
-        """Start a TCP server that listens for responses."""
-        server_address = ("0.0.0.0", port)
+# -------------------------------
+# START SERVER
+# -------------------------------
+def start_server(ip, port):
+    """
+    Bind to the specified IP/Port from Settings.json and handle connections.
+    """
+    server_address = (ip, port)
+    try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server_socket.bind(server_address)
             server_socket.listen(5)
-            logging.info(f"🟢 Server listening for responses on 0.0.0.0:{port}")
+            logger.info(f"Sever Start:  {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')} - Listening on {ip}:{port}")
 
             while True:
                 client_socket, addr = server_socket.accept()
-                logging.info(f"✅ Accepted connection from {addr}")
-
-                client_handler = threading.Thread(
-                    target=self.handle_client,
-                    args=(client_socket,)
-                )
+                logger.info(f"Sever Accepted Connection: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')} - {addr}")
+                client_handler = threading.Thread(target=handle_client, args=(client_socket,))
                 client_handler.start()
+    except OSError as e:
+        logger.error(f"❌ Could not bind to {ip}:{port} -> {e}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error in start_server({ip}:{port}): {e}")
 
-    def handle_client(self, client_socket):
-        """Handle incoming responses to confirm conditions are met."""
+def main():
+    # Load device IP/ports from Settings.json
+    devices = load_settings()
+    if not devices:
+        logger.error(f"No devices found in {settings_file}. Exiting...")
+        return
+
+    # Start a server thread for each (ip, port)
+    logger.info(f"Starting servers for devices: {devices}")
+    for (ip, port) in devices:
+        threading.Thread(target=start_server, args=(ip, port), daemon=True).start()
+
+    # Keep main thread alive
+    while True:
         try:
-            while True:
-                response = client_socket.recv(1024).decode('utf-8')
-                if not response:
-                    break
+            # Sleep or do something else here if needed
+            pass
+        except KeyboardInterrupt:
+            logger.info("Shutting down servers via KeyboardInterrupt.")
+            break
 
-                logging.info(f"📥 Received response: {response}")
-                client_socket.sendall("OK".encode('utf-8'))  # Acknowledge response
-
-                # Check if the correct condition is met before resuming services
-                if f"ID={self.cmd_count}&Return=0&CMD=" in response:
-                    self.cmd_count += 1
-                    self.save_cmd_count(self.cmd_count)
-
-                    # Notify that the correct response has been received
-                    self.response_received.set()
-
-                    # Send HTTP response
-                    date_now = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-                    http_response = (
-                        "HTTP/1.1 200 OK\n"
-                        "Content-Type: text/plain\n"
-                        "Accept-Ranges: bytes\n"
-                        f"Date: {date_now}\n"
-                        "Content-Length: 4\n"
-                    )
-                    client_socket.sendall(http_response.encode('utf-8'))
-
-        except Exception as e:
-            logging.error(f"❌ Error handling response: {e}")
-        finally:
-            client_socket.close()
-            logging.info("🔴 Response connection closed")
+if __name__ == "__main__":
+    main()
