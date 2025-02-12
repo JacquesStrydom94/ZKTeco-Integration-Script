@@ -32,6 +32,9 @@ for handler in logger.handlers:
 cmd_count_file = "cmd_count.json"
 settings_file = "Settings.json"
 
+# We'll store the command template in memory
+cmd_template = "DATA QUERY ATTLOG StartTime=startTime EndTime=endTime"
+
 # -------------------------------
 # LOAD / SAVE CMD_COUNT
 # -------------------------------
@@ -58,12 +61,21 @@ cmd_count = load_cmd_count()
 # -------------------------------
 def load_settings():
     """
-    Expects "devices" array in Settings.json, 
-    e.g.: "devices": [
-            {"ip": "1.2.3.4", "port": 5000},
-            {"ip": "1.2.3.4", "port": 5001}
-         ]
+    Expects something like:
+    {
+      "settings": {
+        "cmd": "DATA QUERY ATTLOG StartTime=startTime EndTime=endTime"
+      },
+      "devices": [
+        { "ip": "127.0.0.1", "port": 5001 },
+        ...
+      ],
+      "logs": [...],
+      "System para": [...]
+    }
     """
+    global cmd_template
+
     if not os.path.exists(settings_file):
         logger.error(f"⚠️ Settings file '{settings_file}' not found. Exiting...")
         os._exit(1)
@@ -71,13 +83,21 @@ def load_settings():
     try:
         with open(settings_file, "r") as f:
             data = json.load(f)
-            # Gather all (ip, port) pairs
+
+            # 1) Extract the command template if present
+            config_settings = data.get("settings", {})
+            if "cmd" in config_settings:
+                cmd_template = config_settings["cmd"]
+                logger.info(f"Using CMD template from settings: {cmd_template}")
+
+            # 2) Gather all (ip, port) pairs
             devices = []
             for dev in data.get("devices", []):
                 ip = dev.get("ip")
                 port = dev.get("port")
                 if ip and port:
                     devices.append((ip, port))
+
             return devices
     except (json.JSONDecodeError, ValueError) as e:
         logger.error(f"❌ Error reading {settings_file}: {e}")
@@ -106,7 +126,7 @@ def send_http_response(client_socket, response_text, content_length):
 # HANDLE CLIENT CONNECTION
 # -------------------------------
 def handle_client(client_socket):
-    global cmd_count
+    global cmd_count, cmd_template
     try:
         response = client_socket.recv(4096).decode('utf-8', errors='ignore')
         if response:
@@ -158,12 +178,13 @@ def handle_client(client_socket):
                 client_socket.sendall("OK".encode('utf-8'))
                 logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\nOK\n")
 
-                # b) Also send a command (DATA QUERY ...)
-                cmd_text = (
-                    f"C:{cmd_count}:DATA QUERY ATTLOG "
-                    f"StartTime={datetime.now().strftime('%Y/%m/%d')}\t"
-                    f"EndTime={datetime.now().strftime('%Y/%m/%d')}"
-                )
+                # b) Also send the command from your JSON
+                now_str = datetime.now().strftime('%Y/%m/%d')
+                # 2b-i) Replace placeholders "startTime" and "endTime" in cmd_template
+                cmd_string = cmd_template.replace("startTime", now_str).replace("endTime", now_str)
+                # e.g. "DATA QUERY ATTLOG StartTime=2023/02/14 EndTime=2023/02/14"
+
+                cmd_text = f"C:{cmd_count}:{cmd_string}"
                 send_http_response(client_socket, cmd_text, len(cmd_text))
                 client_socket.sendall(cmd_text.encode('utf-8'))
                 logger.info(f"Sever Send Data: {datetime.now().strftime('%Y-%m-%d %H:%M:%S:%f')}\n{cmd_text}")
@@ -227,10 +248,10 @@ def start_server(ip, port):
         logger.error(f"❌ Unexpected error in start_server({ip}:{port}): {e}")
 
 def main():
-    # Load device IP/ports from Settings.json
+    # Load device IP/ports from Settings.json and the cmd template
     devices = load_settings()
     if not devices:
-        logger.error(f"No devices found in {settings_file}. Exiting...")
+        logger.error(f"No valid (ip, port) pairs found in {settings_file}. Exiting...")
         return
 
     # Start a server thread for each (ip, port)
@@ -241,7 +262,7 @@ def main():
     # Keep main thread alive
     while True:
         try:
-            # Sleep or do something else here if needed
+            # Sleep or do some other monitoring
             pass
         except KeyboardInterrupt:
             logger.info("Shutting down servers via KeyboardInterrupt.")
