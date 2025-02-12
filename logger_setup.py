@@ -1,8 +1,7 @@
 import logging
 import os
 
-# Maximum log file size in bytes (1GB)
-MAX_LOG_SIZE = 1 * 1024 * 1024 * 1024  # 1GB = 1,073,741,824 bytes
+MAX_LOG_SIZE = 1 * 1024 * 1024 * 1024  # 1GB
 
 class DeduplicationFilter(logging.Filter):
     """Filter to prevent logging duplicate messages consecutively."""
@@ -20,10 +19,10 @@ class DeduplicationFilter(logging.Filter):
 def setup_logger():
     log_file = "server.log"
 
-    # Check if log file exists and its size
+    # Truncate if large
     if os.path.exists(log_file) and os.path.getsize(log_file) >= MAX_LOG_SIZE:
         with open(log_file, "w"):
-            pass  # Truncate the log file if it exceeds the maximum size
+            pass
         print("Log file exceeded 1GB and has been cleared.")
 
     logger = logging.getLogger()
@@ -42,5 +41,4 @@ def setup_logger():
 
     return logger
 
-# Initialize the logger
 logger = setup_logger()
