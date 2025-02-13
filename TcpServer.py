@@ -4,27 +4,26 @@ import logging
 import os
 import json
 import time
-import psutil
-import sqlite3
+import psutil  # ✅ Used to check & free ports
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+# ✅ Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger()
 
-DB_NAME = "PUSH.db"
-TABLE_NAME = "attendance"
-
-MAX_RETRIES = 5
-MAX_BUFFER_SIZE = 2 * 1024 * 1024  # 2MB
-# The device might send "ATTLOG" data in a custom format. Adjust parsing to match your data.
+MAX_RETRIES = 5  # ✅ Retry binding if port is in use
+MAX_BUFFER_SIZE = 2097152  # ✅ 2MB max buffer per connection
+ATTLOG_FILENAME = "attlog.json"
 
 
 class TcpServer:
     def __init__(self, settings_file):
         self.settings_file = settings_file
         self.load_settings()
+        self.attlog_lock = threading.Lock()  # ✅ Lock to prevent race conditions
 
     def load_settings(self):
-        """Load ports from Settings.json."""
+        """Load settings from Settings.json."""
         if not os.path.exists(self.settings_file):
             logger.error(f"⚠️ Settings file '{self.settings_file}' not found. Exiting...")
             exit(1)
@@ -32,11 +31,10 @@ class TcpServer:
         with open(self.settings_file, "r") as file:
             self.settings = json.load(file)
 
-        # Grab all 'port' entries from "devices"
         self.ports = [entry["port"] for entry in self.settings.get("devices", []) if "port" in entry]
 
     def free_port(self, port):
-        """Check and free a port if it's in use (kill the process)."""
+        """Check and free a port if it's already in use."""
         for conn in psutil.net_connections(kind="inet"):
             if conn.laddr.port == port:
                 try:
@@ -44,17 +42,17 @@ class TcpServer:
                     logger.warning(f"⚠ Killing process {proc.pid} ({proc.name()}) using port {port}")
                     proc.terminate()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    logger.warning(f"⚠ Port {port} in use but cannot be freed. Retrying...")
+                    logger.warning(f"⚠ Port {port} is in use but cannot be freed. Trying anyway...")
 
     def listen_for_connections(self, port):
-        """Bind & listen on a TCP port, accept connections, spawn threads for each client."""
+        """Listen for incoming TCP connections."""
         retries = 0
         while retries < MAX_RETRIES:
             try:
-                self.free_port(port)
+                self.free_port(port)  # ✅ Ensure the port is free before binding
 
                 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # ✅ Allow port reuse
                 server_socket.bind(("0.0.0.0", port))
                 server_socket.listen(5)
 
@@ -62,157 +60,135 @@ class TcpServer:
 
                 while True:
                     client_socket, addr = server_socket.accept()
-                    logger.info(f"🚀 Connection from {addr} on port {port}")
-                    threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, addr, port),
-                        daemon=True
-                    ).start()
+                    logger.info(f"🚀 Connection established from {addr} on port {port}")
+                    threading.Thread(target=self.handle_client, args=(client_socket, addr, port)).start()
 
             except OSError as e:
-                if e.errno == 98:  # Address in use
+                if e.errno == 98:  # Address already in use
                     retries += 1
-                    logger.error(f"❌ Port {port} in use. Retry {retries}/{MAX_RETRIES} in 5s...")
-                    time.sleep(5)
+                    logger.error(f"❌ Port {port} is already in use. Retrying in 5 seconds... (Attempt {retries}/{MAX_RETRIES})")
+                    time.sleep(5)  # Wait before retrying
                 else:
-                    logger.error(f"❌ Unexpected error binding {port}: {e}")
+                    logger.error(f"❌ Unexpected error binding to port {port}: {e}")
                     break
+
             finally:
                 try:
                     server_socket.close()
                 except NameError:
-                    pass
+                    pass  # Ignore if server_socket wasn't created
 
-        logger.critical(f"🔥 Failed to bind port {port} after {MAX_RETRIES} attempts.")
+        logger.critical(f"🔥 Failed to bind to port {port} after {MAX_RETRIES} attempts. Exiting...")
 
     def handle_client(self, client_socket, addr, port):
-        """Handle data from a single client connection."""
+        """Handle a single client connection."""
         try:
             while True:
                 data = client_socket.recv(MAX_BUFFER_SIZE)
                 if not data:
-                    logger.info(f"❌ Connection lost from {addr}")
+                    logger.info(f"❌ Connection lost from {addr}. Reconnecting...")
                     break
 
                 data_str = data.decode('utf-8', errors='ignore')
                 logger.info(f"📥 FULL TCP DATA from {addr}:\n{data_str}\n{'-'*60}")
 
-                # 1) Look for an 'ATTLOG' indicator or a known pattern
-                #    For example, your device might send lines that start with "ATTLOG" ...
-                #    We'll do a very simple example parse:
-                if "ATTLOG" not in data_str:
-                    logger.warning("⚠ Non-ATTLOG data (ignored).")
+                # ✅ Log all TCP data, but only process ATTLOG records
+                if "=ATTLOG&Stamp=9999" not in data_str:
+                    logger.warning(f"⚠ Non-ATTLOG Data Received (IGNORED): {data_str[:200]}...")
                     continue
 
-                # 2) Split lines by newline
-                lines = data_str.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith("ATTLOG"):
-                        # Example: "ATTLOG ZKID=12345 Timestamp=2023/02/11 08:00:00 InorOut=1 attype=0 Device=DeviceX SN=Serial999"
-                        # Parse key=value
-                        self.parse_and_insert_attlog(line)
+                # ✅ Extract ATTLOG data and write to attlog.json
+                attlog_data = self.extract_attlog(data_str)
+                if attlog_data:
+                    self.write_to_attlog(attlog_data)
+
+        except IOError as e:
+            logger.error(f"❌ I/O Error in handle_client: {e}")
 
         except Exception as e:
-            logger.error(f"❌ Error in handle_client: {e}")
+            logger.error(f"❌ Unexpected Error in handle_client: {e}")
+
         finally:
             client_socket.close()
             logger.info(f"🔌 Connection closed: {addr}")
 
-    def parse_and_insert_attlog(self, line):
-        """
-        Example line:
-          ATTLOG  ZKID=123  Timestamp=2023-02-11 08:00:00  InorOut=1  attype=0 ...
-        Adjust to match your actual format from the device.
-        """
-        # Remove the initial "ATTLOG"
-        parts = line[len("ATTLOG"):].strip().split()
-        # parts might be: ["ZKID=123", "Timestamp=2023-02-11", "08:00:00", "InorOut=1", ...]
-
-        data_map = {}
-        for p in parts:
-            if '=' in p:
-                k, v = p.split('=', 1)
-                # If the timestamp is split across multiple array elements, you might need a custom parser
-                data_map[k.strip()] = v.strip()
-            else:
-                # Potentially a leftover piece of the timestamp
-                if "Timestamp" in data_map and ":" in p:
-                    # Append time to existing date
-                    data_map["Timestamp"] = data_map["Timestamp"] + " " + p
-
-        # Insert into DB
-        self.insert_record_into_db(data_map)
-
-    def insert_record_into_db(self, data_map):
-        """
-        Insert record into 'attendance' table. 
-        Ensure your columns match what's in Dbcon.py
-        """
-        # Convert timestamp to a uniform format if needed
-        timestamp_raw = data_map.get("Timestamp", "")
-        timestamp_fmt = self.normalize_timestamp(timestamp_raw)
-
-        # Build the row
-        row = {
-            "ZKID": data_map.get("ZKID", ""),
-            "Timestamp": timestamp_fmt,
-            "InorOut": data_map.get("InorOut", None),
-            "attype": data_map.get("attype", None),
-            "Device": data_map.get("Device", ""),
-            "SN": data_map.get("SN", ""),
-            "Devrec": data_map.get("Devrec", "")
-        }
-
+    def extract_attlog(self, data_str):
+        """Extract ATTLOG data from received TCP data."""
         try:
-            with sqlite3.connect(DB_NAME) as conn:
-                cursor = conn.cursor()
-                cursor.execute(f"""
-                    INSERT INTO {TABLE_NAME} (ZKID, Timestamp, InorOut, attype, Device, SN, Devrec)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    row["ZKID"],
-                    row["Timestamp"],
-                    row["InorOut"],
-                    row["attype"],
-                    row["Device"],
-                    row["SN"],
-                    row["Devrec"]
-                ))
-                conn.commit()
+            attlog_start = data_str.find("Content-Length:")
+            if attlog_start == -1:
+                return None
 
-            logger.info(f"✅ Inserted ATTLOG record: {row}")
+            content_length_start = attlog_start + len("Content-Length:")
+            content_length_end = data_str.find("\n", content_length_start)
+            content_length = int(data_str[content_length_start:content_length_end].strip())
 
-        except sqlite3.IntegrityError:
-            logger.warning(f"⚠ Duplicate record ignored: {row}")
+            data_start = data_str.find("\n", content_length_end) + 1
+            attlog_data = data_str[data_start:data_start + content_length].strip()
+
+            return attlog_data.split("\n")  # ✅ Split into multiple entries
+
         except Exception as e:
-            logger.error(f"❌ DB Error: {e}")
+            logger.error(f"❌ Error extracting ATTLOG data: {e}")
+            return None
 
-    def normalize_timestamp(self, ts_str):
-        """
-        Convert timestamp to 'YYYY-MM-DD HH:MM:SS' if possible.
-        Accepts 'YYYY/MM/DD HH:MM:SS' or 'YYYY-MM-DD HH:MM:SS'.
-        """
-        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-            try:
-                dt = datetime.strptime(ts_str, fmt)
-                return dt.strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                pass
-        return ts_str  # fallback
+    def write_to_attlog(self, attlog_entries):
+        """Writes extracted ATTLOG data to attlog.json safely."""
+        try:
+            with self.attlog_lock:  # ✅ Prevent multiple threads from writing simultaneously
+                if not os.path.exists(ATTLOG_FILENAME):
+                    with open(ATTLOG_FILENAME, 'w') as f:
+                        json.dump([], f)
+
+                with open(ATTLOG_FILENAME, 'r+') as f:
+                    try:
+                        content = json.load(f)
+                    except json.JSONDecodeError:
+                        content = []
+
+                    for entry in attlog_entries:
+                        parts = entry.split()
+                        if len(parts) < 5:
+                            logger.warning(f"⚠ Skipping malformed ATTLOG entry: {entry}")
+                            continue
+
+                        record = {
+                            "ZKID": parts[0],
+                            "Timestamp": parts[1] + " " + parts[2],
+                            "InorOut": parts[3],
+                            "attype": parts[4]
+                        }
+
+                        content.append(record)
+                        logger.info(f"✅ Added new ATTLOG record: {record}")
+
+                    f.seek(0)
+                    json.dump(content, f, indent=4)
+                    f.truncate()  # ✅ Ensure old data is removed
+
+        except IOError as e:
+            logger.error(f"❌ I/O Error writing to attlog.json: {e}")
+
+        except Exception as e:
+            logger.error(f"❌ Unexpected Error writing to attlog.json: {e}")
 
     def start_server(self):
-        """Listen on all configured ports. This is called within a while True in Main.py."""
+        """Start the TCP server and listen for connections on all configured ports."""
         if not self.ports:
-            logger.error("❌ No ports configured in Settings.json!")
+            logger.error("❌ No ports configured in Settings.json! Exiting...")
             return
 
         threads = []
         for port in self.ports:
-            t = threading.Thread(target=self.listen_for_connections, args=(port,), daemon=True)
-            t.start()
-            threads.append(t)
+            thread = threading.Thread(target=self.listen_for_connections, args=(port,))
+            thread.start()
+            threads.append(thread)
 
-        # Keep them alive
-        for t in threads:
-            t.join()
+        for thread in threads:
+            thread.join()
+
+
+if __name__ == "__main__":
+    SETTINGS_FILE = "Settings.json"
+    tcp_server = TcpServer(SETTINGS_FILE)
+    tcp_server.start_server()
